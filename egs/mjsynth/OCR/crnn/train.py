@@ -26,7 +26,6 @@ import torch.backends.cudnn as cudnn
 import torch.optim as optim
 import torch.utils.data
 import utils
-from torch.autograd import Variable
 from warpctc_pytorch import CTCLoss
 
 parser = argparse.ArgumentParser()
@@ -165,10 +164,6 @@ if opt.cuda:
     image = image.cuda()
     criterion = criterion.cuda()
 
-image = Variable(image)
-text = Variable(text)
-length = Variable(length)
-
 # loss averager
 loss_avg = utils.averager()
 
@@ -209,7 +204,7 @@ def val(net, dataset, criterion, max_iter=100):
         utils.loadData(length, l)
 
         preds = crnn(image)
-        preds_size = Variable(torch.IntTensor([preds.size(0)] * batch_size))
+        preds_size = torch.IntTensor([preds.size(0)] * batch_size)
         cost = criterion(preds, text, preds_size, length) / batch_size
         loss_avg.add(cost)
 
@@ -241,7 +236,7 @@ def trainBatch(net, criterion, optimizer):
     utils.loadData(length, l)
 
     preds = crnn(image)
-    preds_size = Variable(torch.IntTensor([preds.size(0)] * batch_size))
+    preds_size = torch.IntTensor([preds.size(0)] * batch_size)
     cost = criterion(preds, text, preds_size, length) / batch_size
     crnn.zero_grad()
     cost.backward()

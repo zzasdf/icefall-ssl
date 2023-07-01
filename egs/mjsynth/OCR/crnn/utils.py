@@ -25,7 +25,6 @@ import collections
 
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
 
 
 class strLabelConverter(object):
@@ -118,18 +117,14 @@ class strLabelConverter(object):
 
 
 class averager(object):
-    """Compute average for `torch.Variable` and `torch.Tensor`."""
+    """Compute average for `torch.Tensor`."""
 
     def __init__(self):
         self.reset()
 
     def add(self, v):
-        if isinstance(v, Variable):
-            count = v.data.numel()
-            v = v.data.sum()
-        elif isinstance(v, torch.Tensor):
-            count = v.numel()
-            v = v.sum()
+        count = v.numel()
+        v = v.sum()
 
         self.n_count += count
         self.sum += v

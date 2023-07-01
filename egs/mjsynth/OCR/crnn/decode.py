@@ -23,7 +23,6 @@ import jsonlines
 import torch
 import utils
 from PIL import Image
-from torch.autograd import Variable
 
 
 def test():
@@ -52,7 +51,6 @@ def test():
             if torch.cuda.is_available():
                 image = image.cuda()
             image = image.view(1, *image.size())
-            image = Variable(image)
 
             model.eval()
             preds = model(image)
@@ -60,7 +58,7 @@ def test():
             _, preds = preds.max(2)
             preds = preds.transpose(1, 0).contiguous().view(-1)
 
-            preds_size = Variable(torch.IntTensor([preds.size(0)]))
+            preds_size = torch.IntTensor([preds.size(0)])
             raw_pred = converter.decode(preds.data, preds_size.data, raw=True)
             sim_pred = converter.decode(preds.data, preds_size.data, raw=False)
             logging.info("%-20s => %-20s | %s" % (raw_pred, sim_pred, label.lower()))
