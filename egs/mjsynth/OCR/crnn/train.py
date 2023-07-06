@@ -25,7 +25,7 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
 import torch.utils.data
-import utils
+from utils import resizeNormalize, strLabelConverter
 from warpctc_pytorch import CTCLoss
 
 parser = argparse.ArgumentParser()
@@ -127,13 +127,13 @@ train_loader = torch.utils.data.DataLoader(
     ),
 )
 test_dataset = dataset.lmdbDataset(
-    root=opt.valroot, transform=dataset.resizeNormalize((100, 32))
+    root=opt.valroot, transform=resizeNormalize((100, 32))
 )
 
 nclass = len(opt.alphabet) + 1
 nc = 1
 
-converter = utils.strLabelConverter(opt.alphabet)
+converter = strLabelConverter(opt.alphabet)
 criterion = CTCLoss()
 
 
@@ -165,7 +165,7 @@ if opt.cuda:
     criterion = criterion.cuda()
 
 # loss averager
-loss_avg = utils.averager()
+loss_avg = averager()
 
 # setup optimizer
 if opt.adam:
@@ -190,7 +190,7 @@ def val(net, dataset, criterion, max_iter=100):
 
     i = 0
     n_correct = 0
-    loss_avg = utils.averager()
+    loss_avg = averager()
 
     max_iter = min(max_iter, len(data_loader))
     for i in range(max_iter):
@@ -198,10 +198,10 @@ def val(net, dataset, criterion, max_iter=100):
         i += 1
         cpu_images, cpu_texts = data
         batch_size = cpu_images.size(0)
-        utils.loadData(image, cpu_images)
+        loadData(image, cpu_images)
         t, l = converter.encode(cpu_texts)
-        utils.loadData(text, t)
-        utils.loadData(length, l)
+        loadData(text, t)
+        loadData(length, l)
 
         preds = crnn(image)
         preds_size = torch.IntTensor([preds.size(0)] * batch_size)
@@ -230,10 +230,10 @@ def trainBatch(net, criterion, optimizer):
     data = train_iter.next()
     cpu_images, cpu_texts = data
     batch_size = cpu_images.size(0)
-    utils.loadData(image, cpu_images)
+    loadData(image, cpu_images)
     t, l = converter.encode(cpu_texts)
-    utils.loadData(text, t)
-    utils.loadData(length, l)
+    loadData(text, t)
+    loadData(length, l)
 
     preds = crnn(image)
     preds_size = torch.IntTensor([preds.size(0)] * batch_size)

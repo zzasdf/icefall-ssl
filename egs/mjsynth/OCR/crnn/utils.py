@@ -25,6 +25,8 @@ import collections
 
 import torch
 import torch.nn as nn
+import torchvision.transforms as transforms
+from PIL import Image
 
 
 class strLabelConverter(object):
@@ -116,6 +118,19 @@ class strLabelConverter(object):
             return texts
 
 
+class resizeNormalize(object):
+    def __init__(self, size, interpolation=Image.BILINEAR):
+        self.size = size
+        self.interpolation = interpolation
+        self.toTensor = transforms.ToTensor()
+
+    def __call__(self, img):
+        img = img.resize(self.size, self.interpolation)
+        img = self.toTensor(img)
+        img.sub_(0.5).div_(0.5)
+        return img
+
+
 class averager(object):
     """Compute average for `torch.Tensor`."""
 
@@ -140,35 +155,21 @@ class averager(object):
         return res
 
 
-def oneHot(v, v_length, nc):
-    batchSize = v_length.size(0)
-    maxLength = v_length.max()
-    v_onehot = torch.FloatTensor(batchSize, maxLength, nc).fill_(0)
-    acc = 0
-    for i in range(batchSize):
-        length = v_length[i]
-        label = v[acc : acc + length].view(-1, 1).long()
-        v_onehot[i, :length].scatter_(1, label, 1.0)
-        acc += length
-    return v_onehot
-
-
 def loadData(v, data):
     v.data.resize_(data.size()).copy_(data)
 
 
-def prettyPrint(v):
-    print("Size {0}, Type: {1}".format(str(v.size()), v.data.type()))
-    print(
-        "| Max: %f | Min: %f | Mean: %f"
-        % (v.max().data[0], v.min().data[0], v.mean().data[0])
-    )
-
-
-def assureRatio(img):
-    """Ensure imgH <= imgW."""
-    b, c, h, w = img.size()
-    if h > w:
-        main = nn.UpsamplingBilinear2d(size=(h, h), scale_factor=None)
-        img = main(img)
-    return img
+def LevenshteinDistance(a, b):
+    a_len, b_len = len(a), len(b)
+    d = [[0] * (b_len + 1) for i in range(a_len + 1)]
+    for i in range(1, a_len + 1):
+        d[i][0] = i
+    for j in range(1, b_len + 1):
+        d[0][j] = j
+    for i in range(1, a_len + 1):
+        for j in range(1, b_len + 1):
+            if a[i - 1] == b[j - 1]:
+                d[i][j] = d[i - 1][j - 1]
+            else:
+                d[i][j] = 1 + min(d[i][j - 1], d[i - 1][j], d[i - 1][j - 1])
+    return d[a_len][b_len]

@@ -28,7 +28,6 @@ import lmdb
 import numpy as np
 import six
 import torch
-import torchvision.transforms as transforms
 from PIL import Image
 from torch.utils.data import Dataset, sampler
 
@@ -84,19 +83,6 @@ class lmdbDataset(Dataset):
                 label = self.target_transform(label)
 
         return (img, label)
-
-
-class resizeNormalize(object):
-    def __init__(self, size, interpolation=Image.BILINEAR):
-        self.size = size
-        self.interpolation = interpolation
-        self.toTensor = transforms.ToTensor()
-
-    def __call__(self, img):
-        img = img.resize(self.size, self.interpolation)
-        img = self.toTensor(img)
-        img.sub_(0.5).div_(0.5)
-        return img
 
 
 class randomSequentialSampler(sampler.Sampler):
