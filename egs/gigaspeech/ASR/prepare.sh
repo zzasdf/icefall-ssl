@@ -5,13 +5,13 @@ export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 set -eou pipefail
 
-nj=15
+nj=16
 stage=0
 stop_stage=100
 
-# Split XL subset to a number of pieces (about 2000)
+# Split XL subset to a number of pieces
 # This is to avoid OOM during feature extraction.
-num_per_split=50
+num_splits=1000
 
 # We assume dl_dir (download dir) contains the following
 # directories and files. If not, they will be downloaded
@@ -122,7 +122,7 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     $dl_dir/GigaSpeech data/manifests
 fi
 
-if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
+if 0 && [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
   log "Stage 2: Prepare musan manifest"
   # We assume that you have downloaded the musan corpus
   # to $dl_dir/musan
@@ -147,46 +147,30 @@ if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
   log "Stage 5: Split XL subset into pieces (may take 30 minutes)"
   split_dir=data/fbank/XL_split
   if [ ! -f $split_dir/.split_completed ]; then
-    lhotse split-lazy ./data/fbank/cuts_XL_raw.jsonl.gz $split_dir $num_per_split
+    lhotse split -s $num_splits ./data/fbank/gigaspeech_cuts_XL_raw.jsonl.gz $split_dir
     touch $split_dir/.split_completed
   fi
 fi
 
 if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
   log "Stage 6: Compute features for XL"
-  num_splits=$(find data/fbank/XL_split -name "cuts_XL_raw.*.jsonl.gz" | wc -l)
+  num_splits=$(find data/fbank/XL_split -name "gigaspeech_cuts_XL_raw.*.jsonl.gz" | wc -l)
   python3 ./local/compute_fbank_gigaspeech_splits.py \
     --num-workers 20 \
     --batch-duration 600 \
     --num-splits $num_splits
 fi
 
-if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
-  log "Stage 7: Combine features for XL (may take 3 hours)"
-  if [ ! -f data/fbank/cuts_XL.jsonl.gz ]; then
-    pieces=$(find data/fbank/XL_split -name "cuts_XL.*.jsonl.gz")
-    lhotse combine $pieces data/fbank/cuts_XL.jsonl.gz
-  fi
-fi
-
-if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
-  log "Stage 8: Compute fbank for musan"
+if 0 && [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
+  log "Stage 7: Compute fbank for musan"
   mkdir -p data/fbank
   ./local/compute_fbank_musan.py
 fi
 
-if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
-  log "Stage 9: Prepare phone based lang"
+if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
+  log "Stage 8: Prepare phone based lang"
   lang_dir=data/lang_phone
   mkdir -p $lang_dir
-
-  (echo '!SIL SIL'; echo '<SPOKEN_NOISE> SPN'; echo '<UNK> SPN'; ) |
-    cat - $dl_dir/lm/lexicon.txt |
-    sort | uniq > $lang_dir/lexicon.txt
-
-  if [ ! -f $lang_dir/L_disambig.pt ]; then
-    ./local/prepare_lang.py --lang-dir $lang_dir
-  fi
 
   if [ ! -f $lang_dir/transcript_words.txt ]; then
     gunzip -c "data/manifests/gigaspeech_supervisions_XL.jsonl.gz" \
@@ -211,34 +195,38 @@ if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
     sed -i 's/[ ][ ]*/ /g' $lang_dir/transcript_words.txt
   fi
 
-  cat $lang_dir/transcript_words.txt | sed 's/ /\n/g' \
-    | sort -u | sed '/^$/d' > $lang_dir/words.txt
-  (echo '!SIL'; echo '<SPOKEN_NOISE>'; echo '<UNK>'; ) |
-    cat - $lang_dir/words.txt | sort | uniq | awk '
-    BEGIN {
-      print "<eps> 0";
-    }
-    {
-      if ($1 == "<s>") {
-        print "<s> is in the vocabulary!" | "cat 1>&2"
-        exit 1;
-      }
-      if ($1 == "</s>") {
-        print "</s> is in the vocabulary!" | "cat 1>&2"
-        exit 1;
-      }
-      printf("%s %d\n", $1, NR);
-    }
-    END {
-      printf("#0 %d\n", NR+1);
-      printf("<s> %d\n", NR+2);
-      printf("</s> %d\n", NR+3);
-    }' > $lang_dir/words || exit 1;
-  mv $lang_dir/words $lang_dir/words.txt
+  if [ ! -f $lang_dir/words.txt ]; then  
+    cat $lang_dir/transcript_words.txt | sed 's/ /\n/g' \
+      | sort -u | sed '/^$/d' > $lang_dir/words.txt
+    (echo '!SIL'; echo '<SPOKEN_NOISE>'; echo '<UNK>'; ) |
+      cat - $lang_dir/words.txt | sort | uniq | awk '
+      {
+        if ($1 == "<s>") {
+          print "<s> is in the vocabulary!" | "cat 1>&2"
+          exit 1;
+        }
+        if ($1 == "</s>") {
+          print "</s> is in the vocabulary!" | "cat 1>&2"
+          exit 1;
+        }
+        printf("%s %d\n", $1, NR);
+      }' > $lang_dir/words || exit 1;
+    mv $lang_dir/words $lang_dir/words.txt
+  fi
+
+  if [ ! -f $lang_dir/lexicon.txt ]; then
+    (echo '!SIL SIL'; echo '<SPOKEN_NOISE> SPN'; echo '<UNK> SPN'; ) |
+      cat - $dl_dir/lm/lexicon.txt |
+      sort | uniq > $lang_dir/lexicon.txt
+  fi
+
+  if [ ! -f $lang_dir/L_disambig.pt ]; then
+    ./local/prepare_lang.py --lang-dir $lang_dir --word-table words.txt
+  fi
 fi
 
-if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
-  log "Stage 10: Prepare BPE based lang"
+if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
+  log "Stage 9: Prepare BPE based lang"
 
   for vocab_size in ${vocab_sizes[@]}; do
     lang_dir=data/lang_bpe_${vocab_size}
@@ -260,40 +248,9 @@ if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
   done
 fi
 
-if [ $stage -le 11 ] && [ $stop_stage -ge 11 ]; then
-  log "Stage 11: Prepare bigram P"
-
-  for vocab_size in ${vocab_sizes[@]}; do
-    lang_dir=data/lang_bpe_${vocab_size}
-
-    if [ ! -f $lang_dir/transcript_tokens.txt ]; then
-      ./local/convert_transcript_words_to_tokens.py \
-        --lexicon $lang_dir/lexicon.txt \
-        --transcript $lang_dir/transcript_words.txt \
-        --oov "<UNK>" \
-        > $lang_dir/transcript_tokens.txt
-    fi
-
-    if [ ! -f $lang_dir/P.arpa ]; then
-      ./shared/make_kn_lm.py \
-        -ngram-order 2 \
-        -text $lang_dir/transcript_tokens.txt \
-        -lm $lang_dir/P.arpa
-    fi
-
-    if [ ! -f $lang_dir/P.fst.txt ]; then
-      python3 -m kaldilm \
-        --read-symbol-table="$lang_dir/tokens.txt" \
-        --disambig-symbol='#0' \
-        --max-order=2 \
-        $lang_dir/P.arpa > $lang_dir/P.fst.txt
-    fi
-  done
-fi
-
-if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
-  log "Stage 12: Prepare G"
-  # We assume you have installed kaldilm, if not, please install
+if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
+  log "Stage 10: Prepare G"
+  # We assume you have install kaldilm, if not, please install
   # it using: pip install kaldilm
 
   mkdir -p data/lm
@@ -317,8 +274,13 @@ if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
   fi
 fi
 
-if [ $stage -le 13 ] && [ $stop_stage -ge 13 ]; then
-  log "Stage 13: Compile HLG"
+if [ $stage -le 11 ] && [ $stop_stage -ge 11 ]; then
+  log "Stage 11: Compile LG"
+  ./local/compile_lg.py --lang-dir data/lang_phone
+fi
+
+if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
+  log "Stage 12: Compile HLG"
   ./local/compile_hlg.py --lang-dir data/lang_phone
 
   for vocab_size in ${vocab_sizes[@]}; do

@@ -103,7 +103,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import k2
-import sentencepiece as spm
 import torch
 import torch.nn as nn
 
@@ -122,7 +121,7 @@ from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (average_checkpoints,
                                 average_checkpoints_with_averaged_model,
                                 find_checkpoints, load_checkpoint)
-from icefall.lexicon import Lexicon
+from icefall.lexicon import Lexicon, UniqLexicon
 from icefall.utils import (AttributeDict, make_pad_mask, setup_logger,
                            store_transcripts, str2bool, write_error_stats)
 from train import add_model_arguments, get_model, get_params
@@ -179,17 +178,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--bpe-model",
-        type=str,
-        default="data/lang_bpe_500/bpe.model",
-        help="Path to the BPE model",
-    )
-
-    parser.add_argument(
-        "--lang-dir",
-        type=Path,
-        default="data/lang_bpe_500",
-        help="The lang dir containing word table and LG graph",
+        "--lang-phone-dir", type=str, default="data/lang_phone",
     )
 
     parser.add_argument(
@@ -207,6 +196,16 @@ def get_parser():
           - fast_beam_search_nbest_LG
         If you use fast_beam_search_nbest_LG, you have to specify
         `--lang-dir`, which should contain `LG.pt`.
+        """,
+    )
+
+    parser.add_argument(
+        "--metrics",
+        type=str,
+        default="WER",
+        help="""Possible values are:
+          - WER
+          - PER
         """,
     )
 
@@ -373,7 +372,7 @@ def post_processing(
 def decode_one_batch(
     params: AttributeDict,
     model: nn.Module,
-    sp: spm.SentencePieceProcessor,
+    ul: UniqLexicon,
     batch: dict,
     word_table: Optional[k2.SymbolTable] = None,
     decoding_graph: Optional[k2.Fsa] = None,
@@ -397,8 +396,8 @@ def decode_one_batch(
         It's the return value of :func:`get_params`.
       model:
         The neural model.
-      sp:
-        The BPE model.
+      ul:
+        The UniqLexicon.
       batch:
         It is the return value from iterating
         `lhotse.dataset.K2SpeechRecognitionDataset`. See its documentation
@@ -451,8 +450,12 @@ def decode_one_batch(
             max_contexts=params.max_contexts,
             max_states=params.max_states,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        if params.metrics == "WER":
+            for hyp in hyp_tokens:
+                hyps.append([word_table[i] for i in hyp])
+        elif params.metrics == "PER":
+            for hyp in hyp_tokens:
+                hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "fast_beam_search_nbest_LG":
         hyp_tokens = fast_beam_search_nbest_LG(
             model=model,
@@ -479,8 +482,9 @@ def decode_one_batch(
             num_paths=params.num_paths,
             nbest_scale=params.nbest_scale,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        assert params.metrics == "PER"
+        for hyp in hyp_tokens:
+            hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "fast_beam_search_nbest_oracle":
         hyp_tokens = fast_beam_search_nbest_oracle(
             model=model,
@@ -491,17 +495,22 @@ def decode_one_batch(
             max_contexts=params.max_contexts,
             max_states=params.max_states,
             num_paths=params.num_paths,
-            ref_texts=sp.encode(supervisions["text"]),
+            ref_texts=ul.texts_to_token_ids(supervisions["text"]).tolist(),
             nbest_scale=params.nbest_scale,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        if params.metrics == "WER":
+            for hyp in hyp_tokens:
+                hyps.append([word_table[i] for i in hyp])
+        elif params.metrics == "PER":
+            for hyp in hyp_tokens:
+                hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "greedy_search" and params.max_sym_per_frame == 1:
         hyp_tokens = greedy_search_batch(
             model=model, encoder_out=encoder_out, encoder_out_lens=encoder_out_lens,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        assert params.metrics == "PER"
+        for hyp in hyp_tokens:
+            hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "modified_beam_search":
         hyp_tokens = modified_beam_search(
             model=model,
@@ -510,8 +519,9 @@ def decode_one_batch(
             beam=params.beam_size,
             context_graph=context_graph,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        assert params.metrics == "PER"
+        for hyp in hyp_tokens:
+            hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "modified_beam_search_lm_shallow_fusion":
         hyp_tokens = modified_beam_search_lm_shallow_fusion(
             model=model,
@@ -554,7 +564,7 @@ def decode_one_batch(
             beam=params.beam_size,
             LM=LM,
             LODR_lm=ngram_lm,
-            sp=sp,
+            ul=ul,
             lm_scale_list=lm_scale_list,
         )
     else:
@@ -578,7 +588,8 @@ def decode_one_batch(
                 raise ValueError(
                     f"Unsupported decoding method: {params.decoding_method}"
                 )
-            hyps.append(sp.decode(hyp).split())
+            assert params.metrics == "PER"
+            hyps.append([str(i) for i in hyp])
 
     if params.decoding_method == "greedy_search":
         return {"greedy_search": hyps}
@@ -617,7 +628,7 @@ def decode_dataset(
     dl: torch.utils.data.DataLoader,
     params: AttributeDict,
     model: nn.Module,
-    sp: spm.SentencePieceProcessor,
+    ul: UniqLexicon,
     word_table: Optional[k2.SymbolTable] = None,
     decoding_graph: Optional[k2.Fsa] = None,
     context_graph: Optional[ContextGraph] = None,
@@ -634,8 +645,8 @@ def decode_dataset(
         It is returned by :func:`get_params`.
       model:
         The neural model.
-      sp:
-        The BPE model.
+      ul:
+        The UniqLexicon.
       word_table:
         The word symbol table.
       decoding_graph:
@@ -664,12 +675,13 @@ def decode_dataset(
     results = defaultdict(list)
     for batch_idx, batch in enumerate(dl):
         texts = batch["supervisions"]["text"]
+        token_ids = ul.texts_to_token_ids(texts).tolist()
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
 
         hyps_dict = decode_one_batch(
             params=params,
             model=model,
-            sp=sp,
+            ul=ul,
             decoding_graph=decoding_graph,
             context_graph=context_graph,
             word_table=word_table,
@@ -681,10 +693,16 @@ def decode_dataset(
 
         for name, hyps in hyps_dict.items():
             this_batch = []
-            assert len(hyps) == len(texts)
-            for cut_id, hyp_words, ref_text in zip(cut_ids, hyps, texts):
-                ref_words = ref_text.split()
-                this_batch.append((cut_id, ref_words, hyp_words))
+            if params.metrics == "WER":
+                assert len(hyps) == len(texts)
+                for cut_id, hyp_words, ref_text in zip(cut_ids, hyps, texts):
+                    ref_words = ref_text.split()
+                    this_batch.append((cut_id, ref_words, hyp_words))
+            elif params.metrics == "PER":
+                assert len(hyps) == len(token_ids)
+                for cut_id, hyp_id, ref_token_id in zip(cut_ids, hyps, token_ids):
+                    ref_token_id = [str(i) for i in ref_token_id]
+                    this_batch.append((cut_id, ref_token_id, hyp_id))
 
             results[name].extend(this_batch)
 
@@ -702,44 +720,83 @@ def save_results(
     test_set_name: str,
     results_dict: Dict[str, List[Tuple[str, List[str], List[str]]]],
 ):
-    test_set_wers = dict()
-    for key, results in results_dict.items():
-        recog_path = (
-            params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
-        )
-        results = post_processing(results)
-        results = sorted(results)
-        store_transcripts(filename=recog_path, texts=results)
-        logging.info(f"The transcripts are stored in {recog_path}")
-
-        # The following prints out WERs, per-word error statistics and aligned
-        # ref/hyp pairs.
-        errs_filename = (
-            params.res_dir / f"errs-{test_set_name}-{key}-{params.suffix}.txt"
-        )
-        with open(errs_filename, "w") as f:
-            wer = write_error_stats(
-                f, f"{test_set_name}-{key}", results, enable_log=True
+    if params.metrics == "WER":
+        test_set_wers = dict()
+        for key, results in results_dict.items():
+            recog_path = (
+                params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
             )
-            test_set_wers[key] = wer
+            results = sorted(results)
+            store_transcripts(filename=recog_path, texts=results)
+            logging.info(f"The transcripts are stored in {recog_path}")
 
-        logging.info("Wrote detailed error stats to {}".format(errs_filename))
+            # The following prints out WERs, per-word error statistics and aligned
+            # ref/hyp pairs.
+            errs_filename = (
+                params.res_dir / f"errs-{test_set_name}-{key}-{params.suffix}.txt"
+            )
+            with open(errs_filename, "w") as f:
+                wer = write_error_stats(
+                    f, f"{test_set_name}-{key}", results, enable_log=True
+                )
+                test_set_wers[key] = wer
 
-    test_set_wers = sorted(test_set_wers.items(), key=lambda x: x[1])
-    errs_info = (
-        params.res_dir / f"wer-summary-{test_set_name}-{key}-{params.suffix}.txt"
-    )
-    with open(errs_info, "w") as f:
-        print("settings\tWER", file=f)
+            logging.info("Wrote detailed error stats to {}".format(errs_filename))
+
+        test_set_wers = sorted(test_set_wers.items(), key=lambda x: x[1])
+        errs_info = (
+            params.res_dir / f"wer-summary-{test_set_name}-{key}-{params.suffix}.txt"
+        )
+        with open(errs_info, "w") as f:
+            print("settings\tWER", file=f)
+            for key, val in test_set_wers:
+                print("{}\t{}".format(key, val), file=f)
+
+        s = "\nFor {}, WER of different settings are:\n".format(test_set_name)
+        note = "\tbest for {}".format(test_set_name)
         for key, val in test_set_wers:
-            print("{}\t{}".format(key, val), file=f)
+            s += "{}\t{}{}\n".format(key, val, note)
+            note = ""
+        logging.info(s)
+    elif params.metrics == "PER":
+        test_set_pers = dict()
+        for key, results in results_dict.items():
+            recog_path = (
+                params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
+            )
+            results = post_processing(results)
+            results = sorted(results)
+            store_transcripts(filename=recog_path, texts=results)
+            logging.info(f"The transcripts are stored in {recog_path}")
 
-    s = "\nFor {}, WER of different settings are:\n".format(test_set_name)
-    note = "\tbest for {}".format(test_set_name)
-    for key, val in test_set_wers:
-        s += "{}\t{}{}\n".format(key, val, note)
-        note = ""
-    logging.info(s)
+            # The following prints out PERs, per-phone error statistics and aligned
+            # ref/hyp pairs.
+            errs_filename = (
+                params.res_dir / f"errs-{test_set_name}-{key}-{params.suffix}.txt"
+            )
+            with open(errs_filename, "w") as f:
+                per = write_error_stats(
+                    f, f"{test_set_name}-{key}", results, enable_log=True
+                )
+                test_set_pers[key] = per
+
+            logging.info("Wrote detailed error stats to {}".format(errs_filename))
+
+        test_set_pers = sorted(test_set_pers.items(), key=lambda x: x[1])
+        errs_info = (
+            params.res_dir / f"per-summary-{test_set_name}-{key}-{params.suffix}.txt"
+        )
+        with open(errs_info, "w") as f:
+            print("settings\tPER", file=f)
+            for key, val in test_set_pers:
+                print("{}\t{}".format(key, val), file=f)
+
+        s = "\nFor {}, PER of different settings are:\n".format(test_set_name)
+        note = "\tbest for {}".format(test_set_name)
+        for key, val in test_set_pers:
+            s += "{}\t{}{}\n".format(key, val, note)
+            note = ""
+        logging.info(s)
 
 
 @torch.no_grad()
@@ -829,13 +886,9 @@ def main():
 
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> and <unk> are defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.unk_id = sp.piece_to_id("<unk>")
-    params.vocab_size = sp.get_piece_size()
+    ul = UniqLexicon(params.lang_phone_dir)
+    params.blank_id = 0
+    params.vocab_size = max(ul.tokens) + 1
 
     logging.info(params)
 
@@ -972,8 +1025,7 @@ def main():
 
     if "fast_beam_search" in params.decoding_method:
         if params.decoding_method == "fast_beam_search_nbest_LG":
-            lexicon = Lexicon(params.lang_dir)
-            word_table = lexicon.word_table
+            word_table = ul.word_table
             lg_filename = params.lang_dir / "LG.pt"
             logging.info(f"Loading {lg_filename}")
             decoding_graph = k2.Fsa.from_dict(
@@ -1020,7 +1072,7 @@ def main():
             dl=test_dl,
             params=params,
             model=model,
-            sp=sp,
+            ul=ul,
             word_table=word_table,
             decoding_graph=decoding_graph,
             context_graph=context_graph,

@@ -211,6 +211,16 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--metrics",
+        type=str,
+        default="WER",
+        help="""Possible values are:
+          - WER
+          - PER
+        """,
+    )
+
+    parser.add_argument(
         "--beam-size",
         type=int,
         default=4,
@@ -451,8 +461,12 @@ def decode_one_batch(
             max_contexts=params.max_contexts,
             max_states=params.max_states,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        if params.metrics == "WER":
+            for hyp in sp.decode(hyp_tokens):
+                hyps.append(hyp.split())
+        elif params.metrics == "PER":
+            for hyp in hyp_tokens:
+                hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "fast_beam_search_nbest_LG":
         hyp_tokens = fast_beam_search_nbest_LG(
             model=model,
@@ -479,8 +493,12 @@ def decode_one_batch(
             num_paths=params.num_paths,
             nbest_scale=params.nbest_scale,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        if params.metrics == "WER":
+            for hyp in sp.decode(hyp_tokens):
+                hyps.append(hyp.split())
+        elif params.metrics == "PER":
+            for hyp in hyp_tokens:
+                hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "fast_beam_search_nbest_oracle":
         hyp_tokens = fast_beam_search_nbest_oracle(
             model=model,
@@ -494,14 +512,22 @@ def decode_one_batch(
             ref_texts=sp.encode(supervisions["text"]),
             nbest_scale=params.nbest_scale,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        if params.metrics == "WER":
+            for hyp in sp.decode(hyp_tokens):
+                hyps.append(hyp.split())
+        elif params.metrics == "PER":
+            for hyp in hyp_tokens:
+                hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "greedy_search" and params.max_sym_per_frame == 1:
         hyp_tokens = greedy_search_batch(
             model=model, encoder_out=encoder_out, encoder_out_lens=encoder_out_lens,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        if params.metrics == "WER":
+            for hyp in sp.decode(hyp_tokens):
+                hyps.append(hyp.split())
+        elif params.metrics == "PER":
+            for hyp in hyp_tokens:
+                hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "modified_beam_search":
         hyp_tokens = modified_beam_search(
             model=model,
@@ -510,8 +536,12 @@ def decode_one_batch(
             beam=params.beam_size,
             context_graph=context_graph,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        if params.metrics == "WER":
+            for hyp in sp.decode(hyp_tokens):
+                hyps.append(hyp.split())
+        elif params.metrics == "PER":
+            for hyp in hyp_tokens:
+                hyps.append([str(i) for i in hyp])
     elif params.decoding_method == "modified_beam_search_lm_shallow_fusion":
         hyp_tokens = modified_beam_search_lm_shallow_fusion(
             model=model,
@@ -578,7 +608,10 @@ def decode_one_batch(
                 raise ValueError(
                     f"Unsupported decoding method: {params.decoding_method}"
                 )
-            hyps.append(sp.decode(hyp).split())
+            if params.metrics == "WER":
+                hyps.append(sp.decode(hyp).split())
+            elif params.metrics == "PER":
+                hyps.append([str(i) for i in hyp])
 
     if params.decoding_method == "greedy_search":
         return {"greedy_search": hyps}
@@ -664,6 +697,7 @@ def decode_dataset(
     results = defaultdict(list)
     for batch_idx, batch in enumerate(dl):
         texts = batch["supervisions"]["text"]
+        token_ids = sp.encode(batch["supervisions"]["text"])
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
 
         hyps_dict = decode_one_batch(
@@ -681,10 +715,16 @@ def decode_dataset(
 
         for name, hyps in hyps_dict.items():
             this_batch = []
-            assert len(hyps) == len(texts)
-            for cut_id, hyp_words, ref_text in zip(cut_ids, hyps, texts):
-                ref_words = ref_text.split()
-                this_batch.append((cut_id, ref_words, hyp_words))
+            if params.metrics == "WER":
+                assert len(hyps) == len(texts)
+                for cut_id, hyp_words, ref_text in zip(cut_ids, hyps, texts):
+                    ref_words = ref_text.split()
+                    this_batch.append((cut_id, ref_words, hyp_words))
+            elif params.metrics == "PER":
+                assert len(hyps) == len(token_ids)
+                for cut_id, hyp_id, ref_token_id in zip(cut_ids, hyps, token_ids):
+                    ref_token_id = [str(i) for i in ref_token_id]
+                    this_batch.append((cut_id, ref_token_id, hyp_id))
 
             results[name].extend(this_batch)
 
@@ -702,44 +742,83 @@ def save_results(
     test_set_name: str,
     results_dict: Dict[str, List[Tuple[str, List[str], List[str]]]],
 ):
-    test_set_wers = dict()
-    for key, results in results_dict.items():
-        recog_path = (
-            params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
-        )
-        results = post_processing(results)
-        results = sorted(results)
-        store_transcripts(filename=recog_path, texts=results)
-        logging.info(f"The transcripts are stored in {recog_path}")
-
-        # The following prints out WERs, per-word error statistics and aligned
-        # ref/hyp pairs.
-        errs_filename = (
-            params.res_dir / f"errs-{test_set_name}-{key}-{params.suffix}.txt"
-        )
-        with open(errs_filename, "w") as f:
-            wer = write_error_stats(
-                f, f"{test_set_name}-{key}", results, enable_log=True
+    if params.metrics == "WER":
+        test_set_wers = dict()
+        for key, results in results_dict.items():
+            recog_path = (
+                params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
             )
-            test_set_wers[key] = wer
+            results = post_processing(results)
+            results = sorted(results)
+            store_transcripts(filename=recog_path, texts=results)
+            logging.info(f"The transcripts are stored in {recog_path}")
 
-        logging.info("Wrote detailed error stats to {}".format(errs_filename))
+            # The following prints out WERs, per-word error statistics and aligned
+            # ref/hyp pairs.
+            errs_filename = (
+                params.res_dir / f"errs-{test_set_name}-{key}-{params.suffix}.txt"
+            )
+            with open(errs_filename, "w") as f:
+                wer = write_error_stats(
+                    f, f"{test_set_name}-{key}", results, enable_log=True
+                )
+                test_set_wers[key] = wer
 
-    test_set_wers = sorted(test_set_wers.items(), key=lambda x: x[1])
-    errs_info = (
-        params.res_dir / f"wer-summary-{test_set_name}-{key}-{params.suffix}.txt"
-    )
-    with open(errs_info, "w") as f:
-        print("settings\tWER", file=f)
+            logging.info("Wrote detailed error stats to {}".format(errs_filename))
+
+        test_set_wers = sorted(test_set_wers.items(), key=lambda x: x[1])
+        errs_info = (
+            params.res_dir / f"wer-summary-{test_set_name}-{key}-{params.suffix}.txt"
+        )
+        with open(errs_info, "w") as f:
+            print("settings\tWER", file=f)
+            for key, val in test_set_wers:
+                print("{}\t{}".format(key, val), file=f)
+
+        s = "\nFor {}, WER of different settings are:\n".format(test_set_name)
+        note = "\tbest for {}".format(test_set_name)
         for key, val in test_set_wers:
-            print("{}\t{}".format(key, val), file=f)
+            s += "{}\t{}{}\n".format(key, val, note)
+            note = ""
+        logging.info(s)
+    elif params.metrics == "PER":
+        test_set_pers = dict()
+        for key, results in results_dict.items():
+            recog_path = (
+                params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
+            )
+            results = sorted(results)
+            store_transcripts(filename=recog_path, texts=results)
+            logging.info(f"The transcripts are stored in {recog_path}")
 
-    s = "\nFor {}, WER of different settings are:\n".format(test_set_name)
-    note = "\tbest for {}".format(test_set_name)
-    for key, val in test_set_wers:
-        s += "{}\t{}{}\n".format(key, val, note)
-        note = ""
-    logging.info(s)
+            # The following prints out PERs, per-phone error statistics and aligned
+            # ref/hyp pairs.
+            errs_filename = (
+                params.res_dir / f"errs-{test_set_name}-{key}-{params.suffix}.txt"
+            )
+            with open(errs_filename, "w") as f:
+                per = write_error_stats(
+                    f, f"{test_set_name}-{key}", results, enable_log=True
+                )
+                test_set_pers[key] = per
+
+            logging.info("Wrote detailed error stats to {}".format(errs_filename))
+
+        test_set_pers = sorted(test_set_pers.items(), key=lambda x: x[1])
+        errs_info = (
+            params.res_dir / f"per-summary-{test_set_name}-{key}-{params.suffix}.txt"
+        )
+        with open(errs_info, "w") as f:
+            print("settings\tPER", file=f)
+            for key, val in test_set_pers:
+                print("{}\t{}".format(key, val), file=f)
+
+        s = "\nFor {}, PER of different settings are:\n".format(test_set_name)
+        note = "\tbest for {}".format(test_set_name)
+        for key, val in test_set_pers:
+            s += "{}\t{}{}\n".format(key, val, note)
+            note = ""
+        logging.info(s)
 
 
 @torch.no_grad()

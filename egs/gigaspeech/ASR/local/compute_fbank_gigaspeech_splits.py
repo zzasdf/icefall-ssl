@@ -22,7 +22,12 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from lhotse import CutSet, KaldifeatFbank, KaldifeatFbankConfig
+from lhotse import (
+    CutSet,
+    KaldifeatFbank,
+    KaldifeatFbankConfig,
+    set_audio_duration_mismatch_tolerance,
+)
 
 # Torch's multithreaded behavior needs to be disabled or
 # it wastes a lot of CPU and slow things down.
@@ -80,7 +85,7 @@ def compute_fbank_gigaspeech_splits(args):
     output_dir = Path(output_dir)
     assert output_dir.exists(), f"{output_dir} does not exist!"
 
-    num_digits = 8  # num_digits is fixed by lhotse split-lazy
+    num_digits = 4
 
     start = args.start
     stop = args.stop
@@ -95,16 +100,18 @@ def compute_fbank_gigaspeech_splits(args):
     extractor = KaldifeatFbank(KaldifeatFbankConfig(device=device))
     logging.info(f"device: {device}")
 
+    set_audio_duration_mismatch_tolerance(0.1)
+
     for i in range(start, stop):
-        idx = f"{i + 1}".zfill(num_digits)
+        idx = f"{i}".zfill(num_digits)
         logging.info(f"Processing {idx}/{num_splits}")
 
-        cuts_path = output_dir / f"cuts_XL.{idx}.jsonl.gz"
+        cuts_path = output_dir / f"gigaspeech_cuts_XL.{idx}.jsonl.gz"
         if cuts_path.is_file():
             logging.info(f"{cuts_path} exists - skipping")
             continue
 
-        raw_cuts_path = output_dir / f"cuts_XL_raw.{idx}.jsonl.gz"
+        raw_cuts_path = output_dir / f"gigaspeech_cuts_XL_raw.{idx}.jsonl.gz"
 
         logging.info(f"Loading {raw_cuts_path}")
         cut_set = CutSet.from_file(raw_cuts_path)
