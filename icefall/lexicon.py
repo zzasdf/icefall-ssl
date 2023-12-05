@@ -145,6 +145,7 @@ class Lexicon(object):
     def __init__(
         self,
         lang_dir: Path,
+        word_table: str = "words.txt",
         disambig_pattern: str = re.compile(r"^#\d+$"),
     ):
         """
@@ -162,7 +163,7 @@ class Lexicon(object):
         """
         lang_dir = Path(lang_dir)
         self.token_table = k2.SymbolTable.from_file(lang_dir / "tokens.txt")
-        self.word_table = k2.SymbolTable.from_file(lang_dir / "words.txt")
+        self.word_table = k2.SymbolTable.from_file(lang_dir / word_table)
 
         if (lang_dir / "Linv.pt").exists():
             logging.info(f"Loading pre-compiled {lang_dir}/Linv.pt")
@@ -201,6 +202,7 @@ class UniqLexicon(Lexicon):
     def __init__(
         self,
         lang_dir: Path,
+        word_table: str = "words.txt",
         uniq_filename: str = "uniq_lexicon.txt",
         disambig_pattern: str = re.compile(r"^#\d+$"),
     ):
@@ -212,7 +214,11 @@ class UniqLexicon(Lexicon):
         Each word in the lexicon is assumed to have a unique pronunciation.
         """
         lang_dir = Path(lang_dir)
-        super().__init__(lang_dir=lang_dir, disambig_pattern=disambig_pattern)
+        super().__init__(
+            lang_dir=lang_dir,
+            word_table=word_table,
+            disambig_pattern=disambig_pattern,
+        )
 
         self.ragged_lexicon = convert_lexicon_to_ragged(
             filename=lang_dir / uniq_filename,

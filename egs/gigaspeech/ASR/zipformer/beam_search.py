@@ -19,6 +19,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 
+import kenlm
 import k2
 import sentencepiece as spm
 import torch
@@ -2026,6 +2027,153 @@ def fast_beam_search_with_nbest_rescoring(
     return ans
 
 
+def fast_beam_search_with_nbest_rescoring_LG(
+    model: nn.Module,
+    decoding_graph: k2.Fsa,
+    encoder_out: torch.Tensor,
+    encoder_out_lens: torch.Tensor,
+    beam: float,
+    max_states: int,
+    max_contexts: int,
+    ngram_lm_scale_list: List[float],
+    num_paths: int,
+    G: kenlm.Model,
+    word_table: k2.SymbolTable,
+    use_double_scores: bool = True,
+    nbest_scale: float = 0.5,
+    temperature: float = 1.0,
+    return_timestamps: bool = False,
+) -> Dict[str, Union[List[List[int]], DecodingResults]]:
+    """It limits the maximum number of symbols per frame to 1.
+    A lattice is first obtained using fast beam search, num_path are selected
+    and rescored using a given language model. The shortest path within the
+    lattice is used as the final output.
+
+    Args:
+      model:
+        An instance of `Transducer`.
+      decoding_graph:
+        Decoding graph used for decoding, may be a TrivialGraph or a LG.
+      encoder_out:
+        A tensor of shape (N, T, C) from the encoder.
+      encoder_out_lens:
+        A tensor of shape (N,) containing the number of frames in `encoder_out`
+        before padding.
+      beam:
+        Beam value, similar to the beam used in Kaldi.
+      max_states:
+        Max states per stream per frame.
+      max_contexts:
+        Max contexts pre stream per frame.
+      ngram_lm_scale_list:
+        A list of floats representing LM score scales.
+      num_paths:
+        Number of paths to extract from the decoded lattice.
+      G:
+        An FsaVec containing only a single FSA. It is an n-gram LM.
+      use_double_scores:
+        True to use double precision for computation. False to use
+        single precision.
+      nbest_scale:
+        It's the scale applied to the lattice.scores. A smaller value
+        yields more unique paths.
+      temperature:
+        Softmax temperature.
+      return_timestamps:
+        Whether to return timestamps.
+    Returns:
+      Return the decoded result in a dict, where the key has the form
+      'ngram_lm_scale_xx' and the value is the decoded results
+      optionally with timestamps. `xx` is the ngram LM scale value
+      used during decoding, i.e., 0.1.
+    """
+    lattice = fast_beam_search(
+        model=model,
+        decoding_graph=decoding_graph,
+        encoder_out=encoder_out,
+        encoder_out_lens=encoder_out_lens,
+        beam=beam,
+        max_states=max_states,
+        max_contexts=max_contexts,
+        temperature=temperature,
+    )
+
+    nbest = Nbest.from_lattice(
+        lattice=lattice,
+        num_paths=num_paths,
+        use_double_scores=use_double_scores,
+        nbest_scale=nbest_scale,
+    )
+    # at this point, nbest.fsa.scores are all zeros.
+
+    word_fsa = k2.invert(nbest.fsa)
+    token_fsa = k2.invert(word_fsa)
+    if hasattr(lattice, "aux_labels"):
+        # delete token IDs as it is not needed
+        del word_fsa.aux_labels
+        del token_fsa.aux_labels
+    word_fsa.scores.zero_()
+    token_fsa.scores.zero_()
+    word_fsa_with_epsilon_loops = k2.linear_fsa_with_self_loops(word_fsa)
+    token_fsa_with_epsilon_loops = k2.linear_fsa_with_self_loops(token_fsa)
+    path_to_utt_map = nbest.shape.row_ids(1)
+
+    lattice = k2.arc_sort(lattice)
+
+    if lattice.shape[0] == 1:
+        path_lattice = k2.intersect_device(
+            lattice,
+            token_fsa_with_epsilon_loops,
+            b_to_a_map=torch.zeros_like(path_to_utt_map),
+            sorted_match_a=True,
+        )
+    else:
+        path_lattice = k2.intersect_device(
+            lattice,
+            token_fsa_with_epsilon_loops,
+            b_to_a_map=path_to_utt_map,
+            sorted_match_a=True,
+        )
+
+    # path_lattice has word IDs as labels and token IDs as aux_labels
+    path_lattice = k2.top_sort(k2.connect(path_lattice))
+    am_scores = path_lattice.get_tot_scores(
+        use_double_scores=use_double_scores,
+        log_semiring=True,  # Note: we always use True
+    )
+
+    device = next(model.parameters()).device
+    words_shape = word_fsa.arcs.shape().remove_axis(1)  # [path][arc]
+    words = k2.RaggedTensor(words_shape, word_fsa.labels.contiguous())
+    words = words.remove_values_leq(0)  # remove -1 and 0
+
+    # Now ngram LM
+    ngram_lm_scores = []
+    for i in range(words.dim0):
+        text = ""
+        for j in range(len(words[i])):
+            text += word_table[int(words[i][j])]
+            text += " "
+        ngram_lm_score = [prob * math.log(10) for prob, _, _ in G.full_scores(text)]
+        ngram_lm_scores.append(sum(ngram_lm_score))
+    ngram_lm_scores = torch.tensor(ngram_lm_scores, dtype=torch.float32).to(device)
+
+    ans: Dict[str, Union[List[List[int]], DecodingResults]] = {}
+    for s in ngram_lm_scale_list:
+        key = f"ngram_lm_scale_{s}"
+        tot_scores = am_scores + s * ngram_lm_scores
+        ragged_tot_scores = k2.RaggedTensor(nbest.shape, tot_scores)
+        max_indexes = ragged_tot_scores.argmax()
+        best_path = k2.index_fsa(nbest.fsa, max_indexes)
+
+        if not return_timestamps:
+            ans[key] = get_texts(best_path)
+        else:
+            ans[key] = get_texts_with_timestamp(best_path)
+
+    return ans
+
+
 def fast_beam_search_with_nbest_rnn_rescoring(
     model: nn.Module,
     decoding_graph: k2.Fsa,
@@ -2213,6 +2361,165 @@ def fast_beam_search_with_nbest_rnn_rescoring(
                 ans[key] = get_texts(best_path)
             else:
                 ans[key] = get_texts_with_timestamp(best_path)
+
+    return ans
+
+
+def fast_beam_search_with_nbest_rnn_rescoring_LG(
+    model: nn.Module,
+    decoding_graph: k2.Fsa,
+    encoder_out: torch.Tensor,
+    encoder_out_lens: torch.Tensor,
+    beam: float,
+    max_states: int,
+    max_contexts: int,
+    num_paths: int,
+    rnn_lm_model: torch.nn.Module,
+    rnn_lm_scale_list: List[float],
+    use_double_scores: bool = True,
+    nbest_scale: float = 0.5,
+    temperature: float = 1.0,
+    return_timestamps: bool = False,
+) -> Dict[str, Union[List[List[int]], DecodingResults]]:
+    """It limits the maximum number of symbols per frame to 1.
+    A lattice is first obtained using fast beam search, num_path are selected
+    and rescored using a given language model. The shortest path within the
+    lattice is used as the final output.
+
+    Args:
+      model:
+        An instance of `Transducer`.
+      decoding_graph:
+        Decoding graph used for decoding, may be a TrivialGraph or a LG.
+      encoder_out:
+        A tensor of shape (N, T, C) from the encoder.
+      encoder_out_lens:
+        A tensor of shape (N,) containing the number of frames in `encoder_out`
+        before padding.
+      beam:
+        Beam value, similar to the beam used in Kaldi.
+      max_states:
+        Max states per stream per frame.
+      max_contexts:
+        Max contexts pre stream per frame.
+      num_paths:
+        Number of paths to extract from the decoded lattice.
+      rnn_lm_model:
+        A rnn-lm model used for LM rescoring
+      rnn_lm_scale_list:
+        A list of floats representing RNN score scales.
+      use_double_scores:
+        True to use double precision for computation. False to use
+        single precision.
+      nbest_scale:
+        It's the scale applied to the lattice.scores. A smaller value
+        yields more unique paths.
+      temperature:
+        Softmax temperature.
+      return_timestamps:
+        Whether to return timestamps.
+    Returns:
+      Return the decoded result in a dict, where the key has the form
+      'ngram_lm_scale_xx' and the value is the decoded results
+      optionally with timestamps. `xx` is the ngram LM scale value
+      used during decoding, i.e., 0.1.
+    """
+    lattice = fast_beam_search(
+        model=model,
+        decoding_graph=decoding_graph,
+        encoder_out=encoder_out,
+        encoder_out_lens=encoder_out_lens,
+        beam=beam,
+        max_states=max_states,
+        max_contexts=max_contexts,
+        temperature=temperature,
+    )
+
+    nbest = Nbest.from_lattice(
+        lattice=lattice,
+        num_paths=num_paths,
+        use_double_scores=use_double_scores,
+        nbest_scale=nbest_scale,
+    )
+    # at this point, nbest.fsa.scores are all zeros.
+
+    word_fsa = k2.invert(nbest.fsa)
+    token_fsa = k2.invert(word_fsa)
+    if hasattr(lattice, "aux_labels"):
+        # delete token IDs as it is not needed
+        del word_fsa.aux_labels
+        del token_fsa.aux_labels
+    word_fsa.scores.zero_()
+    token_fsa.scores.zero_()
+    word_fsa_with_epsilon_loops = k2.linear_fsa_with_self_loops(word_fsa)
+    token_fsa_with_epsilon_loops = k2.linear_fsa_with_self_loops(token_fsa)
+    path_to_utt_map = nbest.shape.row_ids(1)
+
+    lattice = k2.arc_sort(lattice)
+
+    if lattice.shape[0] == 1:
+        path_lattice = k2.intersect_device(
+            lattice,
+            token_fsa_with_epsilon_loops,
+            b_to_a_map=torch.zeros_like(path_to_utt_map),
+            sorted_match_a=True,
+        )
+    else:
+        path_lattice = k2.intersect_device(
+            lattice,
+            token_fsa_with_epsilon_loops,
+            b_to_a_map=path_to_utt_map,
+            sorted_match_a=True,
+        )
+
+    # path_lattice has word IDs as labels and token IDs as aux_labels
+    path_lattice = k2.top_sort(k2.connect(path_lattice))
+    am_scores = path_lattice.get_tot_scores(
+        use_double_scores=use_double_scores,
+        log_semiring=True,  # Note: we always use True
+    )
+
+    device = next(model.parameters()).device
+
+    words_shape = word_fsa.arcs.shape().remove_axis(1)  # [path][arc]
+    words = k2.RaggedTensor(words_shape, word_fsa.labels.contiguous())
+    words = words.remove_values_leq(0)  # remove -1 and 0
+
+    # Now RNNLM
+    sos_words = add_sos(words, 1)
+    words_eos = add_eos(words, 1)
+    sos_words_row_splits = sos_words.shape.row_splits(1)
+    sentence_lengths = sos_words_row_splits[1:] - sos_words_row_splits[:-1]
+    rnn_lm_scores = []
+    for i in range(words.dim0):
+        x_word = sos_words[i].unsqueeze(0)
+        y_word = words_eos[i].unsqueeze(0)
+        sentence_length = sentence_lengths[i].unsqueeze(0)
+        x_word = x_word.to(torch.int64).to(device)
+        y_word = y_word.to(torch.int64).to(device)
+        sentence_length = sentence_length.to(torch.int64).to(device)
+        rnn_lm_model.to(device)
+
+        hidden = rnn_lm_model.init_hidden(1)
+        output, _ = rnn_lm_model(x_word.permute(1, 0), hidden)
+
+        nll_loss = torch.nn.functional.nll_loss(output, y_word.reshape(-1), reduction="none")
+        rnn_lm_score = -1 * nll_loss.sum()
+        rnn_lm_scores.append(rnn_lm_score)
+    rnn_lm_scores = torch.tensor(rnn_lm_scores, dtype=torch.float32).to(device)
+
+    ans: Dict[str, Union[List[List[int]], DecodingResults]] = {}
+    for s in rnn_lm_scale_list:
+        key = f"rnn_lm_scale_{s}"
+        tot_scores = am_scores + s * rnn_lm_scores
+        ragged_tot_scores = k2.RaggedTensor(nbest.shape, tot_scores)
+        max_indexes = ragged_tot_scores.argmax()
+        best_path = k2.index_fsa(nbest.fsa, max_indexes)
+
+        if not return_timestamps:
+            ans[key] = get_texts(best_path)
+        else:
+            ans[key] = get_texts_with_timestamp(best_path)
 
     return ans
 

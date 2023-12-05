@@ -122,7 +122,7 @@ from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (average_checkpoints,
                                 average_checkpoints_with_averaged_model,
                                 find_checkpoints, load_checkpoint)
-from icefall.lexicon import Lexicon
+from icefall.lexicon import Lexicon, UniqLexicon
 from icefall.utils import (AttributeDict, make_pad_mask, setup_logger,
                            store_transcripts, str2bool, write_error_stats)
 from train import add_model_arguments, get_model, get_params
@@ -190,6 +190,10 @@ def get_parser():
         type=Path,
         default="data/lang_bpe_500",
         help="The lang dir containing word table and LG graph",
+    )
+
+    parser.add_argument(
+        "--lang-phone-dir", type=str, default="data/lang_phone",
     )
 
     parser.add_argument(
@@ -384,6 +388,7 @@ def decode_one_batch(
     params: AttributeDict,
     model: nn.Module,
     sp: spm.SentencePieceProcessor,
+    ul: UniqLexicon,
     batch: dict,
     word_table: Optional[k2.SymbolTable] = None,
     decoding_graph: Optional[k2.Fsa] = None,
@@ -409,6 +414,8 @@ def decode_one_batch(
         The neural model.
       sp:
         The BPE model.
+      ul:
+        The UniqLexicon.
       batch:
         It is the return value from iterating
         `lhotse.dataset.K2SpeechRecognitionDataset`. See its documentation
@@ -461,12 +468,8 @@ def decode_one_batch(
             max_contexts=params.max_contexts,
             max_states=params.max_states,
         )
-        if params.metrics == "WER":
-            for hyp in sp.decode(hyp_tokens):
-                hyps.append(hyp.split())
-        elif params.metrics == "PER":
-            for hyp in hyp_tokens:
-                hyps.append([str(i) for i in hyp])
+        for hyp in sp.decode(hyp_tokens):
+            hyps.append(hyp.split())
     elif params.decoding_method == "fast_beam_search_nbest_LG":
         hyp_tokens = fast_beam_search_nbest_LG(
             model=model,
@@ -493,12 +496,8 @@ def decode_one_batch(
             num_paths=params.num_paths,
             nbest_scale=params.nbest_scale,
         )
-        if params.metrics == "WER":
-            for hyp in sp.decode(hyp_tokens):
-                hyps.append(hyp.split())
-        elif params.metrics == "PER":
-            for hyp in hyp_tokens:
-                hyps.append([str(i) for i in hyp])
+        for hyp in sp.decode(hyp_tokens):
+            hyps.append(hyp.split())
     elif params.decoding_method == "fast_beam_search_nbest_oracle":
         hyp_tokens = fast_beam_search_nbest_oracle(
             model=model,
@@ -512,22 +511,14 @@ def decode_one_batch(
             ref_texts=sp.encode(supervisions["text"]),
             nbest_scale=params.nbest_scale,
         )
-        if params.metrics == "WER":
-            for hyp in sp.decode(hyp_tokens):
-                hyps.append(hyp.split())
-        elif params.metrics == "PER":
-            for hyp in hyp_tokens:
-                hyps.append([str(i) for i in hyp])
+        for hyp in sp.decode(hyp_tokens):
+            hyps.append(hyp.split())
     elif params.decoding_method == "greedy_search" and params.max_sym_per_frame == 1:
         hyp_tokens = greedy_search_batch(
             model=model, encoder_out=encoder_out, encoder_out_lens=encoder_out_lens,
         )
-        if params.metrics == "WER":
-            for hyp in sp.decode(hyp_tokens):
-                hyps.append(hyp.split())
-        elif params.metrics == "PER":
-            for hyp in hyp_tokens:
-                hyps.append([str(i) for i in hyp])
+        for hyp in sp.decode(hyp_tokens):
+            hyps.append(hyp.split())
     elif params.decoding_method == "modified_beam_search":
         hyp_tokens = modified_beam_search(
             model=model,
@@ -536,12 +527,8 @@ def decode_one_batch(
             beam=params.beam_size,
             context_graph=context_graph,
         )
-        if params.metrics == "WER":
-            for hyp in sp.decode(hyp_tokens):
-                hyps.append(hyp.split())
-        elif params.metrics == "PER":
-            for hyp in hyp_tokens:
-                hyps.append([str(i) for i in hyp])
+        for hyp in sp.decode(hyp_tokens):
+            hyps.append(hyp.split())
     elif params.decoding_method == "modified_beam_search_lm_shallow_fusion":
         hyp_tokens = modified_beam_search_lm_shallow_fusion(
             model=model,
@@ -608,10 +595,7 @@ def decode_one_batch(
                 raise ValueError(
                     f"Unsupported decoding method: {params.decoding_method}"
                 )
-            if params.metrics == "WER":
-                hyps.append(sp.decode(hyp).split())
-            elif params.metrics == "PER":
-                hyps.append([str(i) for i in hyp])
+            hyps.append(sp.decode(hyp).split())
 
     if params.decoding_method == "greedy_search":
         return {"greedy_search": hyps}
@@ -651,6 +635,7 @@ def decode_dataset(
     params: AttributeDict,
     model: nn.Module,
     sp: spm.SentencePieceProcessor,
+    ul: UniqLexicon,
     word_table: Optional[k2.SymbolTable] = None,
     decoding_graph: Optional[k2.Fsa] = None,
     context_graph: Optional[ContextGraph] = None,
@@ -669,6 +654,8 @@ def decode_dataset(
         The neural model.
       sp:
         The BPE model.
+      ul:
+        The UniqLexicon.
       word_table:
         The word symbol table.
       decoding_graph:
@@ -697,13 +684,14 @@ def decode_dataset(
     results = defaultdict(list)
     for batch_idx, batch in enumerate(dl):
         texts = batch["supervisions"]["text"]
-        token_ids = sp.encode(batch["supervisions"]["text"])
+        token_ids = ul.texts_to_token_ids(texts).tolist()
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
 
         hyps_dict = decode_one_batch(
             params=params,
             model=model,
             sp=sp,
+            ul=ul,
             decoding_graph=decoding_graph,
             context_graph=context_graph,
             word_table=word_table,
@@ -722,7 +710,8 @@ def decode_dataset(
                     this_batch.append((cut_id, ref_words, hyp_words))
             elif params.metrics == "PER":
                 assert len(hyps) == len(token_ids)
-                for cut_id, hyp_id, ref_token_id in zip(cut_ids, hyps, token_ids):
+                for cut_id, hyp_words, ref_token_id in zip(cut_ids, hyps, token_ids):
+                    hyp_id = [str(i) for i in ul.texts_to_token_ids(hyp_words).values.tolist()]
                     ref_token_id = [str(i) for i in ref_token_id]
                     this_batch.append((cut_id, ref_token_id, hyp_id))
 
@@ -907,6 +896,8 @@ def main():
         device = torch.device("cuda", 0)
 
     logging.info(f"Device: {device}")
+
+    ul = UniqLexicon(params.lang_phone_dir, "lm_words.txt")
 
     sp = spm.SentencePieceProcessor()
     sp.load(params.bpe_model)
@@ -1100,6 +1091,7 @@ def main():
             params=params,
             model=model,
             sp=sp,
+            ul=ul,
             word_table=word_table,
             decoding_graph=decoding_graph,
             context_graph=context_graph,
