@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
-# Copyright 2021-2022 Xiaomi Corporation (Author: Fangjun Kuang,
-#                                                 Zengwei Yao
+# Copyright 2021-2023 Xiaomi Corporation (Author: Fangjun Kuang,
+#                                                 Zengwei Yao)
 #                                                 Mingshuang Luo)
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
@@ -21,8 +21,8 @@
 Usage:
 (1) greedy search
 ./zipformer/decode.py \
-    --epoch 35 \
-    --avg 15 \
+    --epoch 40 \
+    --avg 20 \
     --exp-dir ./zipformer/exp \
     --lang-dir data/lang_char \
     --max-duration 600 \
@@ -30,18 +30,18 @@ Usage:
 
 (2) modified beam search
 ./zipformer/decode.py \
-    --epoch 35 \
-    --avg 15 \
+    --epoch 40 \
+    --avg 20 \
     --exp-dir ./zipformer/exp \
     --lang-dir data/lang_char \
     --max-duration 600 \
     --decoding-method modified_beam_search \
     --beam-size 4
 
-(3) fast beam search (trivial_graph)
+(3) fast beam search
 ./zipformer/decode.py \
-    --epoch 35 \
-    --avg 15 \
+    --epoch 40 \
+    --avg 20 \
     --exp-dir ./zipformer/exp \
     --lang-dir data/lang_char \
     --max-duration 600 \
@@ -49,32 +49,6 @@ Usage:
     --beam 20.0 \
     --max-contexts 8 \
     --max-states 64
-
-(4) fast beam search (LG)
-./zipformer/decode.py \
-    --epoch 30 \
-    --avg 15 \
-    --exp-dir ./zipformer/exp \
-    --lang-dir data/lang_char \
-    --max-duration 600 \
-    --decoding-method fast_beam_search_LG \
-    --beam 20.0 \
-    --max-contexts 8 \
-    --max-states 64
-
-(5) fast beam search (nbest oracle WER)
-./zipformer/decode.py \
-    --epoch 35 \
-    --avg 15 \
-    --exp-dir ./zipformer/exp \
-    --lang-dir data/lang_char \
-    --max-duration 600 \
-    --decoding-method fast_beam_search_nbest_oracle \
-    --beam 20.0 \
-    --max-contexts 8 \
-    --max-states 64 \
-    --num-paths 200 \
-    --nbest-scale 0.5
 """
 
 
@@ -91,9 +65,6 @@ import torch.nn as nn
 from asr_datamodule import AishellAsrDataModule
 from beam_search import (
     beam_search,
-    fast_beam_search_nbest,
-    fast_beam_search_nbest_LG,
-    fast_beam_search_nbest_oracle,
     fast_beam_search_one_best,
     greedy_search,
     greedy_search_batch,
@@ -177,7 +148,7 @@ def get_parser():
         "--lang-dir",
         type=Path,
         default="data/lang_char",
-        help="The lang dir containing word table and LG graph",
+        help="The lang dir containing word table",
     )
 
     parser.add_argument(
@@ -188,10 +159,6 @@ def get_parser():
           - greedy_search
           - modified_beam_search
           - fast_beam_search
-          - fast_beam_search_LG
-          - fast_beam_search_nbest_oracle
-        If you use fast_beam_search_LG, you have to specify
-        `--lang-dir`, which should contain `LG.pt`.
         """,
     )
 
@@ -212,28 +179,6 @@ def get_parser():
         search (i.e., `cutoff = max-score - beam`), which is the same as the
         `beam` in Kaldi.
         Used only when --decoding-method is fast_beam_search,
-        fast_beam_search, fast_beam_search_LG,
-        and fast_beam_search_nbest_oracle
-        """,
-    )
-
-    parser.add_argument(
-        "--ngram-lm-scale",
-        type=float,
-        default=0.01,
-        help="""
-        Used only when --decoding_method is fast_beam_search_LG.
-        It specifies the scale for n-gram LM scores.
-        """,
-    )
-
-    parser.add_argument(
-        "--ilme-scale",
-        type=float,
-        default=0.2,
-        help="""
-        Used only when --decoding_method is fast_beam_search_LG.
-        It specifies the scale for the internal language model estimation.
         """,
     )
 
@@ -241,25 +186,21 @@ def get_parser():
         "--max-contexts",
         type=int,
         default=8,
-        help="""Used only when --decoding-method is
-        fast_beam_search, fast_beam_search, fast_beam_search_LG,
-        and fast_beam_search_nbest_oracle""",
+        help="""Used only when --decoding-method is fast_beam_search""",
     )
 
     parser.add_argument(
         "--max-states",
         type=int,
         default=64,
-        help="""Used only when --decoding-method is
-        fast_beam_search, fast_beam_search, fast_beam_search_LG,
-        and fast_beam_search_nbest_oracle""",
+        help="""Used only when --decoding-method is fast_beam_search""",
     )
 
     parser.add_argument(
         "--context-size",
         type=int,
-        default=2,
-        help="The context size in the decoder. 1 means bigram; 2 means tri-gram",
+        default=1,
+        help="The context size in the decoder. 1 means bigram; " "2 means tri-gram",
     )
 
     parser.add_argument(
@@ -268,34 +209,6 @@ def get_parser():
         default=1,
         help="""Maximum number of symbols per frame.
         Used only when --decoding_method is greedy_search""",
-    )
-
-    parser.add_argument(
-        "--num-paths",
-        type=int,
-        default=200,
-        help="""Number of paths for nbest decoding.
-        Used only when the decoding method is fast_beam_search_nbest_oracle""",
-    )
-
-    parser.add_argument(
-        "--nbest-scale",
-        type=float,
-        default=0.5,
-        help="""Scale applied to lattice scores when computing nbest paths.
-        Used only when the decoding method is and fast_beam_search_nbest_oracle""",
-    )
-
-    parser.add_argument(
-        "--blank-penalty",
-        type=float,
-        default=0.0,
-        help="""
-        The penalty applied on blank symbol during decoding.
-        Note: It is a positive value that would be applied to logits like
-        this `logits[:, 0] -= blank_penalty` (suppose logits.shape is
-        [batch_size, vocab] and blank id is 0).
-        """,
     )
 
     add_model_arguments(parser)
@@ -331,9 +244,8 @@ def decode_one_batch(
         `lhotse.dataset.K2SpeechRecognitionDataset`. See its documentation
         for the format of the `batch`.
       decoding_graph:
-        The decoding graph. Can be either a `k2.trivial_graph` or LG, Used
-        only when --decoding_method is fast_beam_search, fast_beam_search_nbest,
-        fast_beam_search_nbest_oracle, and fast_beam_search_nbest_LG.
+        The decoding graph. Can be either a `k2.trivial_graph`, Used
+        only when --decoding_method is fast_beam_search.
     Returns:
       Return the decoding result. See above description for the format of
       the returned dict.
@@ -358,13 +270,7 @@ def decode_one_batch(
             value=LOG_EPS,
         )
 
-    x, x_lens = model.encoder_embed(feature, feature_lens)
-
-    src_key_padding_mask = make_pad_mask(x_lens)
-    x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-
-    encoder_out, encoder_out_lens = model.encoder(x, x_lens, src_key_padding_mask)
-    encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
+    encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens)
 
     hyps = []
 
@@ -377,38 +283,6 @@ def decode_one_batch(
             beam=params.beam,
             max_contexts=params.max_contexts,
             max_states=params.max_states,
-            blank_penalty=params.blank_penalty,
-        )
-        for i in range(encoder_out.size(0)):
-            hyps.append([lexicon.token_table[idx] for idx in hyp_tokens[i]])
-    elif params.decoding_method == "fast_beam_search_LG":
-        hyp_tokens = fast_beam_search_one_best(
-            model=model,
-            decoding_graph=decoding_graph,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam,
-            max_contexts=params.max_contexts,
-            max_states=params.max_states,
-            blank_penalty=params.blank_penalty,
-            ilme_scale=params.ilme_scale,
-        )
-        for hyp in hyp_tokens:
-            sentence = "".join([lexicon.word_table[i] for i in hyp])
-            hyps.append(list(sentence))
-    elif params.decoding_method == "fast_beam_search_nbest_oracle":
-        hyp_tokens = fast_beam_search_nbest_oracle(
-            model=model,
-            decoding_graph=decoding_graph,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam,
-            max_contexts=params.max_contexts,
-            max_states=params.max_states,
-            num_paths=params.num_paths,
-            ref_texts=graph_compiler.texts_to_ids(supervisions["text"]),
-            nbest_scale=params.nbest_scale,
-            blank_penalty=params.blank_penalty,
         )
         for i in range(encoder_out.size(0)):
             hyps.append([lexicon.token_table[idx] for idx in hyp_tokens[i]])
@@ -417,7 +291,6 @@ def decode_one_batch(
             model=model,
             encoder_out=encoder_out,
             encoder_out_lens=encoder_out_lens,
-            blank_penalty=params.blank_penalty,
         )
         for i in range(encoder_out.size(0)):
             hyps.append([lexicon.token_table[idx] for idx in hyp_tokens[i]])
@@ -426,7 +299,6 @@ def decode_one_batch(
             model=model,
             encoder_out=encoder_out,
             encoder_out_lens=encoder_out_lens,
-            blank_penalty=params.blank_penalty,
             beam=params.beam_size,
         )
         for i in range(encoder_out.size(0)):
@@ -436,21 +308,19 @@ def decode_one_batch(
 
         for i in range(batch_size):
             # fmt: off
-            encoder_out_i = encoder_out[i:i + 1, :encoder_out_lens[i]]
+            encoder_out_i = encoder_out[i:i+1, :encoder_out_lens[i]]
             # fmt: on
             if params.decoding_method == "greedy_search":
                 hyp = greedy_search(
                     model=model,
                     encoder_out=encoder_out_i,
                     max_sym_per_frame=params.max_sym_per_frame,
-                    blank_penalty=params.blank_penalty,
                 )
             elif params.decoding_method == "beam_search":
                 hyp = beam_search(
                     model=model,
                     encoder_out=encoder_out_i,
                     beam=params.beam_size,
-                    blank_penalty=params.blank_penalty,
                 )
             else:
                 raise ValueError(
@@ -458,23 +328,15 @@ def decode_one_batch(
                 )
             hyps.append([lexicon.token_table[idx] for idx in hyp])
 
-    key = f"blank_penalty_{params.blank_penalty}"
     if params.decoding_method == "greedy_search":
-        return {"greedy_search_" + key: hyps}
+        return {"greedy_search": hyps}
     elif "fast_beam_search" in params.decoding_method:
-        key += f"_beam_{params.beam}_"
+        key = f"beam_{params.beam}_"
         key += f"max_contexts_{params.max_contexts}_"
         key += f"max_states_{params.max_states}"
-        if "nbest" in params.decoding_method:
-            key += f"_num_paths_{params.num_paths}_"
-            key += f"nbest_scale_{params.nbest_scale}"
-        if "LG" in params.decoding_method:
-            key += f"_ilme_scale_{params.ilme_scale}"
-            key += f"_ngram_lm_scale_{params.ngram_lm_scale}"
-
         return {key: hyps}
     else:
-        return {f"beam_size_{params.beam_size}_" + key: hyps}
+        return {f"beam_size_{params.beam_size}": hyps}
 
 
 def decode_dataset(
@@ -495,9 +357,8 @@ def decode_dataset(
       model:
         The neural model.
       decoding_graph:
-        The decoding graph. Can be either a `k2.trivial_graph` or LG, Used
-        only when --decoding_method is fast_beam_search, fast_beam_search_nbest,
-        fast_beam_search_nbest_oracle, and fast_beam_search_nbest_LG.
+        The decoding graph. Can be either a `k2.trivial_graph`, Used
+        only when --decoding_method is fast_beam_search.
     Returns:
       Return a dict, whose key may be "greedy_search" if greedy search
       is used, or it may be "beam_7" if beam size of 7 is used.
@@ -552,7 +413,7 @@ def decode_dataset(
 def save_results(
     params: AttributeDict,
     test_set_name: str,
-    results_dict: Dict[str, List[Tuple[List[int], List[int]]]],
+    results_dict: Dict[str, List[Tuple[str, List[str], List[str]]]],
 ):
     test_set_wers = dict()
     for key, results in results_dict.items():
@@ -605,11 +466,8 @@ def main():
 
     assert params.decoding_method in (
         "greedy_search",
-        "beam_search",
         "modified_beam_search",
         "fast_beam_search",
-        "fast_beam_search_LG",
-        "fast_beam_search_nbest_oracle",
     )
     params.res_dir = params.exp_dir / params.decoding_method
 
@@ -632,18 +490,11 @@ def main():
         params.suffix += f"-beam-{params.beam}"
         params.suffix += f"-max-contexts-{params.max_contexts}"
         params.suffix += f"-max-states-{params.max_states}"
-        if "nbest" in params.decoding_method:
-            params.suffix += f"-nbest-scale-{params.nbest_scale}"
-            params.suffix += f"-num-paths-{params.num_paths}"
-        if "LG" in params.decoding_method:
-            params.suffix += f"_ilme_scale_{params.ilme_scale}"
-            params.suffix += f"-ngram-lm-scale-{params.ngram_lm_scale}"
     elif "beam_search" in params.decoding_method:
         params.suffix += f"-{params.decoding_method}-beam-size-{params.beam_size}"
     else:
         params.suffix += f"-context-{params.context_size}"
         params.suffix += f"-max-sym-per-frame-{params.max_sym_per_frame}"
-    params.suffix += f"-blank-penalty-{params.blank_penalty}"
 
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
@@ -752,16 +603,7 @@ def main():
     model.eval()
 
     if "fast_beam_search" in params.decoding_method:
-        if "LG" in params.decoding_method:
-            lexicon = Lexicon(params.lang_dir)
-            lg_filename = params.lang_dir / "LG.pt"
-            logging.info(f"Loading {lg_filename}")
-            decoding_graph = k2.Fsa.from_dict(
-                torch.load(lg_filename, map_location=device)
-            )
-            decoding_graph.scores *= params.ngram_lm_scale
-        else:
-            decoding_graph = k2.trivial_graph(params.vocab_size - 1, device=device)
+        decoding_graph = k2.trivial_graph(params.vocab_size - 1, device=device)
     else:
         decoding_graph = None
 

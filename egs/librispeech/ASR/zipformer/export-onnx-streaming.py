@@ -19,6 +19,7 @@ GIT_LFS_SKIP_SMUDGE=1 git clone $repo_url
 repo=$(basename $repo_url)
 
 pushd $repo
+git lfs pull --include "data/lang_bpe_500/tokens.txt"
 git lfs pull --include "exp/pretrained.pt"
 
 cd exp
@@ -73,6 +74,7 @@ import onnx
 import torch
 import torch.nn as nn
 from decoder import Decoder
+from export import num_tokens
 from onnxruntime.quantization import QuantType, quantize_dynamic
 from scaling_converter import convert_scaled_to_non_scaled
 from train import add_model_arguments, get_model, get_params
@@ -84,7 +86,7 @@ from icefall.checkpoint import (
     find_checkpoints,
     load_checkpoint,
 )
-from icefall.utils import num_tokens, str2bool
+from icefall.utils import str2bool
 
 
 def get_parser():
@@ -506,7 +508,6 @@ def export_decoder_model_onnx(
     vocab_size = decoder_model.decoder.vocab_size
 
     y = torch.zeros(10, context_size, dtype=torch.int64)
-    decoder_model = torch.jit.script(decoder_model)
     torch.onnx.export(
         decoder_model,
         y,

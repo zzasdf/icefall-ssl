@@ -2,7 +2,7 @@ Recipes
 =======
 
 This page contains various recipes in ``icefall``.
-Currently, we provide recipes for speech recognition, language model, and speech synthesis.
+Currently, only speech recognition recipes are provided.
 
 We may add recipes for other tasks as well in the future.
 
@@ -15,5 +15,3 @@ We may add recipes for other tasks as well in the future.
 
    Non-streaming-ASR/index
    Streaming-ASR/index
-   RNN-LM/index
-   TTS/index

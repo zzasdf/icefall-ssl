@@ -7,18 +7,19 @@
 This script exports a transducer model from PyTorch to ONNX.
 
 We use the pre-trained model from
-https://huggingface.co/yfyeung/icefall-asr-gigaspeech-zipformer-2023-10-17
+https://huggingface.co/Zengwei/icefall-asr-librispeech-zipformer-2023-05-15
 as an example to show how to use this file.
 
 1. Download the pre-trained model
 
-cd egs/gigaspeech/ASR
+cd egs/librispeech/ASR
 
-repo_url=https://huggingface.co/yfyeung/icefall-asr-gigaspeech-zipformer-2023-10-17
+repo_url=https://huggingface.co/Zengwei/icefall-asr-librispeech-zipformer-2023-05-15
 GIT_LFS_SKIP_SMUDGE=1 git clone $repo_url
 repo=$(basename $repo_url)
 
 pushd $repo
+git lfs pull --include "data/lang_bpe_500/tokens.txt"
 git lfs pull --include "exp/pretrained.pt"
 
 cd exp
@@ -70,6 +71,7 @@ import onnx
 import torch
 import torch.nn as nn
 from decoder import Decoder
+from export import num_tokens
 from onnxruntime.quantization import QuantType, quantize_dynamic
 from scaling_converter import convert_scaled_to_non_scaled
 from train import add_model_arguments, get_model, get_params
@@ -81,7 +83,7 @@ from icefall.checkpoint import (
     find_checkpoints,
     load_checkpoint,
 )
-from icefall.utils import make_pad_mask, num_tokens, str2bool
+from icefall.utils import make_pad_mask, str2bool
 
 
 def get_parser():
@@ -353,7 +355,6 @@ def export_decoder_model_onnx(
     vocab_size = decoder_model.decoder.vocab_size
 
     y = torch.zeros(10, context_size, dtype=torch.int64)
-    decoder_model = torch.jit.script(decoder_model)
     torch.onnx.export(
         decoder_model,
         y,

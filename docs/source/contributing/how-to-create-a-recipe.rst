@@ -3,7 +3,7 @@ How to create a recipe
 
 .. HINT::
 
-  Please read :ref:`follow the code style` to adjust your code style.
+  Please read :ref:`follow the code style` to adjust your code sytle.
 
 .. CAUTION::
 

@@ -107,7 +107,7 @@ class LibriSpeechAsrDataModule:
             type=int,
             default=200.0,
             help="Maximum pooled recordings duration (seconds) in a "
-            "single batch. You can reduce it if it causes CUDA OOM.",
+            "simple batch. You can reduce it if it causes CUDA OOM.",
         )
         group.add_argument(
             "--bucketing-sampler",
@@ -203,7 +203,7 @@ class LibriSpeechAsrDataModule:
         group.add_argument(
             "--enable-musan",
             type=str2bool,
-            default=True,
+            default=False,
             help="When enabled, select noise from MUSAN and mix it"
             "with training dataset. ",
         )
@@ -233,7 +233,7 @@ class LibriSpeechAsrDataModule:
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest(self.args.manifest_dir / "musan_cuts.jsonl.gz")
             transforms.append(
-                CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
+                CutMix(cuts=cuts_musan, prob=0.5, snr=(10, 20), preserve_id=True)
             )
         else:
             logging.info("Disable MUSAN")

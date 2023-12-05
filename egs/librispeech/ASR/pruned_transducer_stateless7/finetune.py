@@ -655,12 +655,8 @@ def load_model_params(
         dst_state_dict = model.state_dict()
         for module in init_modules:
             logging.info(f"Loading parameters starting with prefix {module}")
-            src_keys = [
-                k for k in src_state_dict.keys() if k.startswith(module.strip() + ".")
-            ]
-            dst_keys = [
-                k for k in dst_state_dict.keys() if k.startswith(module.strip() + ".")
-            ]
+            src_keys = [k for k in src_state_dict.keys() if k.startswith(module)]
+            dst_keys = [k for k in dst_state_dict.keys() if k.startswith(module)]
             assert set(src_keys) == set(dst_keys)  # two sets should match exactly
             for key in src_keys:
                 dst_state_dict[key] = src_state_dict.pop(key)
@@ -1093,9 +1089,6 @@ def run(rank, world_size, args):
         checkpoints = load_model_params(
             ckpt=params.finetune_ckpt, model=model, init_modules=modules
         )
-        if rank == 0:
-            # model_avg is only used with rank 0
-            model_avg = copy.deepcopy(model).to(torch.float64)
     else:
         assert params.start_epoch > 0, params.start_epoch
         checkpoints = load_checkpoint_if_available(
@@ -1139,7 +1132,7 @@ def run(rank, world_size, args):
 
     if params.print_diagnostics:
         opts = diagnostics.TensorDiagnosticOptions(
-            512
+            2**22
         )  # allow 4 megabytes per sub-module
         diagnostic = diagnostics.attach_diagnostics(model, opts)
 

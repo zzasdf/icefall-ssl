@@ -3,7 +3,6 @@
 #                                                       Wei Kang,
 #                                                       Mingshuang Luo,
 #                                                       Zengwei Yao,
-#                                                       Yifan Yang,
 #                                                       Daniel Povey)
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
@@ -22,11 +21,11 @@
 """
 Usage:
 
-export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 # For non-streaming model training:
 ./zipformer/train.py \
-  --world-size 8 \
+  --world-size 4 \
   --num-epochs 30 \
   --start-epoch 1 \
   --use-fp16 1 \
@@ -35,7 +34,7 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 
 # For streaming model training:
 ./zipformer/train.py \
-  --world-size 8 \
+  --world-size 4 \
   --num-epochs 30 \
   --start-epoch 1 \
   --use-fp16 1 \
@@ -342,7 +341,7 @@ def get_parser():
     parser.add_argument(
         "--lr-epochs",
         type=float,
-        default=1,
+        default=10.5,
         help="""Number of epochs that affects how rapidly the learning rate decreases.
         """,
     )
@@ -426,7 +425,7 @@ def get_parser():
     parser.add_argument(
         "--save-every-n",
         type=int,
-        default=8000,
+        default=4000,
         help="""Save checkpoint after processing this number of batches"
         periodically. We save checkpoint to exp-dir/ whenever
         params.batch_idx_train % save_every_n == 0. The checkpoint filename
@@ -524,9 +523,9 @@ def get_params() -> AttributeDict:
             "best_train_epoch": -1,
             "best_valid_epoch": -1,
             "batch_idx_train": 0,
-            "log_interval": 500,
-            "reset_interval": 2000,
-            "valid_interval": 20000,
+            "log_interval": 50,
+            "reset_interval": 200,
+            "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
             "feature_dim": 80,
             "subsampling_factor": 4,  # not passed in, this is fixed.
@@ -1164,7 +1163,7 @@ def run(rank, world_size, args):
 
     if params.print_diagnostics:
         opts = diagnostics.TensorDiagnosticOptions(
-            512
+            2**22
         )  # allow 4 megabytes per sub-module
         diagnostic = diagnostics.attach_diagnostics(model, opts)
 
@@ -1174,6 +1173,45 @@ def run(rank, world_size, args):
     gigaspeech = GigaSpeechAsrDataModule(args)
 
     train_cuts = gigaspeech.train_cuts()
+
+    def remove_short_and_long_utt(c: Cut):
+        # Keep only utterances with duration between 1 second and 20 seconds
+        #
+        # Caution: There is a reason to select 20.0 here. Please see
+        # ../local/display_manifest_statistics.py
+        #
+        # You should use ../local/display_manifest_statistics.py to get
+        # an utterance duration distribution for your dataset to select
+        # the threshold
+        if c.duration < 1.0 or c.duration > 20.0:
+            # logging.warning(
+            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
+            # )
+            return False
+
+        # In pruned RNN-T, we require that T >= S
+        # where T is the number of feature frames after subsampling
+        # and S is the number of tokens in the utterance
+
+        # In ./zipformer.py, the conv module uses the following expression
+        # for subsampling
+        T = ((c.num_frames - 7) // 2 + 1) // 2
+        tokens = sp.encode(c.supervisions[0].text, out_type=str)
+
+        if T < len(tokens):
+            logging.warning(
+                f"Exclude cut with ID {c.id} from training. "
+                f"Number of frames (before subsampling): {c.num_frames}. "
+                f"Number of frames (after subsampling): {T}. "
+                f"Text: {c.supervisions[0].text}. "
+                f"Tokens: {tokens}. "
+                f"Number of tokens: {len(tokens)}"
+            )
+            return False
+
+        return True
+
+    train_cuts = train_cuts.filter(remove_short_and_long_utt)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1189,7 +1227,7 @@ def run(rank, world_size, args):
     valid_cuts = gigaspeech.dev_cuts()
     valid_dl = gigaspeech.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
+    if 0 and not params.print_diagnostics:
         scan_pessimistic_batches_for_oom(
             model=model,
             train_dl=train_dl,

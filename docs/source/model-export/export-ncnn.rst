@@ -1,5 +1,3 @@
-.. _icefall_export_to_ncnn:
-
 Export to ncnn
 ==============
 

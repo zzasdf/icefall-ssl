@@ -264,7 +264,6 @@ def decode_dataset(
         - timestamps of reference transcript
         - timestamps of predicted result
     """
-
     #  Background worker to add alignemnt and save cuts to disk.
     def _save_worker(
         cuts: List[Cut],

@@ -24,7 +24,7 @@
 
 Usage:
 
-Note: This is a example for gigaspeech dataset, if you are using different
+Note: This is a example for librispeech dataset, if you are using different
 dataset, you should change the argument values according to your dataset.
 
 (1) Export to torchscript model using torch.jit.script()
@@ -96,7 +96,7 @@ you can do:
     cd /path/to/exp_dir
     ln -s pretrained.pt epoch-9999.pt
 
-    cd /path/to/egs/gigaspeech/ASR
+    cd /path/to/egs/librispeech/ASR
     ./zipformer/decode.py \
         --exp-dir ./zipformer/exp \
         --epoch 9999 \
@@ -112,7 +112,7 @@ To use the generated file with `zipformer/decode.py` and `zipformer/streaming_de
     cd /path/to/exp_dir
     ln -s pretrained.pt epoch-9999.pt
 
-    cd /path/to/egs/gigaspeech/ASR
+    cd /path/to/egs/librispeech/ASR
 
     # simulated streaming decoding
     ./zipformer/decode.py \
@@ -144,18 +144,23 @@ Note: If you don't want to train a model from scratch, we have
 provided one for you. You can get it at
 
 - non-streaming model:
-https://huggingface.co/yfyeung/icefall-asr-gigaspeech-zipformer-2023-10-17
+https://huggingface.co/Zengwei/icefall-asr-librispeech-zipformer-2023-05-15
+
+- streaming model:
+https://huggingface.co/Zengwei/icefall-asr-librispeech-streaming-zipformer-2023-05-17
 
 with the following commands:
 
     sudo apt-get install git-lfs
     git lfs install
-    git clone https://huggingface.co/yfyeung/icefall-asr-gigaspeech-zipformer-2023-10-17
+    git clone https://huggingface.co/Zengwei/icefall-asr-librispeech-zipformer-2023-05-15
+    git clone https://huggingface.co/Zengwei/icefall-asr-librispeech-streaming-zipformer-2023-05-17
     # You will find the pre-trained models in exp dir
 """
 
 import argparse
 import logging
+import re
 from pathlib import Path
 from typing import List, Tuple
 
@@ -171,7 +176,27 @@ from icefall.checkpoint import (
     find_checkpoints,
     load_checkpoint,
 )
-from icefall.utils import make_pad_mask, num_tokens, str2bool
+from icefall.utils import make_pad_mask, str2bool
+
+
+def num_tokens(
+    token_table: k2.SymbolTable, disambig_pattern: str = re.compile(r"^#\d+$")
+) -> int:
+    """Return the number of tokens excluding those from
+    disambiguation symbols.
+
+    Caution:
+      0 is not a token ID so it is excluded from the return value.
+    """
+    symbols = token_table.symbols
+    ans = []
+    for s in symbols:
+        if not disambig_pattern.match(s):
+            ans.append(token_table[s])
+    num_tokens = len(ans)
+    if 0 in ans:
+        num_tokens -= 1
+    return num_tokens
 
 
 def get_parser():
@@ -462,8 +487,6 @@ def main():
                     device=device,
                 )
             )
-        elif params.avg == 1:
-            load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
         else:
             assert params.avg > 0, params.avg
             start = params.epoch - params.avg
