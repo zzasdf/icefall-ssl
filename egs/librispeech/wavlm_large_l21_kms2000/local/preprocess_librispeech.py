@@ -57,24 +57,21 @@ def get_args():
     return parser.parse_args()
 
 
-def compute_fbank_librispeech(
+def preprocess_librispeech(
     dataset: Optional[str] = None,
 ):
-    src_dir = Path("data/manifests")
-    output_dir = Path("data/fbank")
+    src_dir = Path(".")
+    output_dir = Path(".")
 
-    if dataset is None:
-        dataset_parts = (
-            "dev-clean",
-            "dev-other",
-            "test-clean",
-            "test-other",
-            "train-clean-100",
-            "train-clean-360",
-            "train-other-500",
-        )
-    else:
-        dataset_parts = dataset.split(" ", -1)
+    dataset_parts = (
+        # "dev-clean",
+        # "dev-other",
+        # "test-clean",
+        # "test-other",
+        "train-clean-100",
+        "train-clean-360",
+        "train-other-500",
+    )
 
     prefix = "librispeech"
     suffix = "jsonl.gz"
@@ -94,23 +91,22 @@ def compute_fbank_librispeech(
     )
 
     for partition, m in manifests.items():
-        cuts_filename = f"{prefix}_cuts_{partition}.{suffix}"
-        if (output_dir / cuts_filename).is_file():
+        raw_cuts_path = output_dir / f"{prefix}_cuts_{partition}_raw.jsonl"
+        if (raw_cuts_path).is_file():
             logging.info(f"{partition} already exists - skipping.")
             continue
+
+        logging.info(f"Preprocessing {partition}")
         cut_set = CutSet.from_manifests(
             recordings=m["recordings"],
             supervisions=m["supervisions"],
         )
-        logging.info(f"Processing {partition}")
-        for i in tqdm(range(len(cut_set))):
-            cut_set[i].discrete_tokens = cut_set[i].supervisions[0].discrete_tokens
-            try:
-                del cut_set[i].supervisions[0].custom
-            except:
-                pass
 
-        cut_set.to_file(output_dir / cuts_filename)
+        logging.info(f"Saving to {raw_cuts_path}")
+        cut_set.to_file(raw_cuts_path)
+
+    os.system("rm librispeech_recordings_*")
+    os.system("rm librispeech_supervisions_*")
 
 
 if __name__ == "__main__":
@@ -119,6 +115,6 @@ if __name__ == "__main__":
     logging.basicConfig(format=formatter, level=logging.INFO)
     args = get_args()
     logging.info(vars(args))
-    compute_fbank_librispeech(
+    preprocess_librispeech(
         dataset=args.dataset,
     )
